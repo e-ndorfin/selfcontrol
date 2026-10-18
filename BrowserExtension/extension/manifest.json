@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "Add to SelfControl",
+  "version": "1.0.0",
+  "description": "Add the current website to your SelfControl blocklist with one click.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAyHnAP5k1LK0OXACIQkWp/CFDoQ4VqoeQbKOHhJTmHvBRZSXMnAi4S2Fmd6gFbxVy38uwN4YNGnFbdJB+9uCBco3LSPhaI+8Pi1jqUaBzuRTIrIPezXg+aQnBCfZI5umtQZqg7cpTgkzz9verbKzMk2szs3hqJintJRL0wuQHoaTIvYTAWc1uzpL/dpuFG1Sv4pdl2DRYwPaFDvHuKG0tWCFEFukHuG/kReHEz8OQ/a+2QCgxIBAvLAuI38yHRtPMcfdUOhsGLo+Q6tAVD8iHw9t0Wmn7CGvUuB9wK3B9T3/vTXdlSCct1RBTgoU5K745q/kWEqRllu2OEtMHfANdNwIDAQAB",
+  "permissions": [
+    "activeTab",
+    "nativeMessaging"
+  ],
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Add this website to SelfControl",
+    "default_icon": {
+      "16": "icon16.png",
+      "32": "icon32.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icon16.png",
+    "32": "icon32.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  }
+}
