@@ -21,9 +21,22 @@
 }
 
 - (void)viewDidLoad  {
+    [super viewDidLoad];
     // set the valid sounds in the Block Sound menu
     [self.soundMenu removeAllItems];
     [self.soundMenu addItemsWithTitles: SCConstants.systemSoundNames];
+    [self.view setFrameSize:NSMakeSize(NSWidth(self.view.frame), NSHeight(self.view.frame) + 68)];
+    NSButton *showMenu = [[NSButton alloc] initWithFrame:NSMakeRect(20, 40, 440, 22)];
+    showMenu.buttonType = NSSwitchButton;
+    showMenu.title = NSLocalizedStringFromTable(@"Show SelfControl in the menu bar", @"StatusItem", @"menu bar preference");
+    [showMenu bind:NSValueBinding toObject:NSUserDefaultsController.sharedUserDefaultsController withKeyPath:@"values.ShowMenuBarItem" options:nil];
+    [self.view addSubview:showMenu];
+    NSButton *countdown = [[NSButton alloc] initWithFrame:NSMakeRect(40, 12, 420, 22)];
+    countdown.buttonType = NSSwitchButton;
+    countdown.title = NSLocalizedStringFromTable(@"Show remaining time beside the menu bar icon", @"StatusItem", @"menu bar countdown preference");
+    [countdown bind:NSValueBinding toObject:NSUserDefaultsController.sharedUserDefaultsController withKeyPath:@"values.ShowMenuBarCountdown" options:nil];
+    [countdown bind:NSEnabledBinding toObject:NSUserDefaultsController.sharedUserDefaultsController withKeyPath:@"values.ShowMenuBarItem" options:nil];
+    [self.view addSubview:countdown];
 }
 
 - (IBAction)soundSelectionChanged:(NSPopUpButton*)sender {

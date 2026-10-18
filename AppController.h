@@ -83,6 +83,9 @@
 // Allocates a new TimerWindowController if necessary and opens the timer window.
 - (void)showTimerWindow;
 
+// Opens the weekly schedule even while the timer window is showing an active block.
+- (IBAction)showSchedule:(id)sender;
+
 // Calls the close method of our TimerWindowController
 - (void)closeTimerWindow;
 

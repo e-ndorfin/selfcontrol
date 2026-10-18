@@ -183,7 +183,7 @@
         return;
     }
     
-    CFErrorRef cfError;
+    CFErrorRef cfError = NULL;
 
     // in some cases, SMJobBless will fail if we don't first remove the currently running daemon
     // it's not clear why exactly or what the exact cause is, but I can reproduce consistently
@@ -304,6 +304,72 @@
                 reply(error);
             }];
         }
+    }];
+}
+
+- (void)getWeeklySchedule:(void (^)(NSDictionary *, NSError *))reply {
+    [self connectAndExecuteCommandBlock:^(NSError *error) {
+        if (error) { reply(nil, error); return; }
+        [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError *proxyError) { reply(nil, proxyError); }]
+            getWeeklyScheduleWithReply:^(NSDictionary *status) { reply(status, nil); }];
+    }];
+}
+- (void)setWeeklySchedule:(NSDictionary *)configuration reply:(void (^)(NSError *))reply {
+    [self connectAndExecuteCommandBlock:^(NSError *error) {
+        if (error) { reply(error); return; }
+        [[self.daemonConnection remoteObjectProxyWithErrorHandler:reply] setWeeklySchedule:configuration authorization:self.authorization reply:reply];
+    }];
+}
+- (void)appendWeeklyWebsites:(NSArray<NSString *> *)entries reply:(void (^)(NSError *))reply {
+    [self connectAndExecuteCommandBlock:^(NSError *error) {
+        if (error) { reply(error); return; }
+        [[self.daemonConnection remoteObjectProxyWithErrorHandler:reply] appendWeeklyWebsites:entries authorization:self.authorization reply:reply];
+    }];
+}
+
+- (void)setWeeklySchedule:(NSDictionary *)configuration friendPassword:(NSString *)password reply:(void (^)(NSError *))reply {
+    [self connectAndExecuteCommandBlock:^(NSError *error) {
+        if (error) { reply(error); return; }
+        [[self.daemonConnection remoteObjectProxyWithErrorHandler:reply] setWeeklySchedule:configuration friendPassword:password authorization:self.authorization reply:reply];
+    }];
+}
+- (void)setSharedPolicy:(NSDictionary *)policy friendPassword:(NSString *)password reply:(void (^)(NSError *))reply {
+    [self connectAndExecuteCommandBlock:^(NSError *error) {
+        if (error) { reply(error); return; }
+        [[self.daemonConnection remoteObjectProxyWithErrorHandler:reply] setSharedPolicy:policy friendPassword:password authorization:self.authorization reply:reply];
+    }];
+}
+- (void)requestWebsiteBreak:(NSString *)domain reply:(void (^)(NSError *))reply {
+    [self connectAndExecuteCommandBlock:^(NSError *error) {
+        if (error) { reply(error); return; }
+        [[self.daemonConnection remoteObjectProxyWithErrorHandler:reply] requestWebsiteBreak:domain reply:reply];
+    }];
+}
+
+- (void)appendBlockedWebsites:(NSArray<NSString *> *)domains reply:(void (^)(NSDictionary *, NSError *))reply {
+    [self connectAndExecuteCommandBlock:^(NSError *error) {
+        if (error) { reply(@{}, error); return; }
+        [[self.daemonConnection remoteObjectProxyWithErrorHandler:^(NSError *proxyError) { reply(@{}, proxyError); }]
+            appendBlockedWebsites:domains reply:reply];
+    }];
+}
+- (void)prepareBrowserIntegration:(NSDictionary *)policy reply:(void (^)(NSError *))reply {
+    [self connectAndExecuteCommandBlock:^(NSError *error) {
+        if (error) { reply(error); return; }
+        [[self.daemonConnection remoteObjectProxyWithErrorHandler:reply]
+            prepareBrowserIntegration:policy authorization:self.authorization reply:reply];
+    }];
+}
+- (void)setFriendPassword:(NSString *)password policy:(NSDictionary *)policy reply:(void (^)(NSError *))reply {
+    [self connectAndExecuteCommandBlock:^(NSError *error) {
+        if (error) { reply(error); return; }
+        [[self.daemonConnection remoteObjectProxyWithErrorHandler:reply] setFriendPassword:password policy:policy authorization:self.authorization reply:reply];
+    }];
+}
+- (void)disableFriendPassword:(NSString *)password reply:(void (^)(NSError *))reply {
+    [self connectAndExecuteCommandBlock:^(NSError *error) {
+        if (error) { reply(error); return; }
+        [[self.daemonConnection remoteObjectProxyWithErrorHandler:reply] disableFriendPassword:password authorization:self.authorization reply:reply];
     }];
 }
 

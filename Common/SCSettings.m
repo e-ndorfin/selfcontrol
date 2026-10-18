@@ -82,6 +82,12 @@ NSString* const SETTINGS_FILE_DIR = @"/usr/local/etc/";
         @"BlockEndDate": [NSDate distantPast],
         @"ActiveBlocklist": @[],
         @"ActiveBlockAsWhitelist": @NO,
+        @"ScheduleManagedBlock": @NO,
+        @"ManualBlockEndDate": [NSDate distantPast],
+        @"WebsiteBreakDomain": @"",
+        @"WebsiteBreakUntil": [NSDate distantPast],
+        @"WebsiteBreakNextAvailable": [NSDate distantPast],
+        @"BlockControllingUID": @0,
 
         @"BlockIsRunning": @NO, // tells us whether a block is actually running on the system (to the best of our knowledge)
         @"TamperingDetected": @NO,
@@ -475,6 +481,7 @@ NSString* const SETTINGS_FILE_DIR = @"/usr/local/etc/";
     [dictCopy setObject: @(blocklistLength) forKey: @"ActiveBlocklistLength"];
     [dictCopy removeObjectForKey: @"Blocklist"];
     [dictCopy removeObjectForKey: @"ActiveBlocklist"];
+    [dictCopy removeObjectForKey:@"WebsiteBreakDomain"];
 
     // and serialize dates to string, since Sentry has a hard time with that
     NSArray<NSString*>* dateKeys = @[@"BlockEndDate", @"LastSettingsUpdate"];

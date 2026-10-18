@@ -27,10 +27,15 @@
 #import "SCBlockFileReaderWriter.h"
 #import <sysexits.h>
 #import "XPMArguments.h"
+#import "SCBrowserIntegration.h"
 
 // The main method which deals which most of the logic flow and execution of
 // the CLI tool.
 int main(int argc, char* argv[]) {
+    // Browser mode reserves stdout for framed JSON and never starts telemetry.
+    if (argc > 1 && strcmp(argv[1], "--native-messaging") == 0) return SCBrowserNativeMain(argc, argv);
+    if (argc == 2 && strcmp(argv[1], "--browser-status") == 0) return SCBrowserStatusMain();
+    if (argc == 2 && strcmp(argv[1], "--browser-setup") == 0) return SCBrowserSetupMain();
     [SCSentry startSentry: @"org.eyebeam.selfcontrol-cli"];
 
     @autoreleasepool {
@@ -128,6 +133,24 @@ int main(int argc, char* argv[]) {
                 blockEndDate = [NSDate dateWithTimeIntervalSinceNow: blockDurationSecs];
             }
             
+            // Default starts consume the authoritative shared list, even if the
+            // app was closed when the browser added a website. Explicit files
+            // remain explicit inputs and go through the normal policy checks.
+            if (pathToBlocklistFile == nil) {
+                NSError *policyError;
+                NSDictionary *status = SCBrowserReadStatus([SCXPCClient new], &policyError);
+                if (status[@"slots"] && [status[@"controllingUID"] unsignedIntValue] == controllingUID) {
+                    blocklist = status[@"blocklist"];
+                    blockAsWhitelist = [status[@"isAllowlist"] boolValue];
+                    NSMutableDictionary *current = [defaultsDict mutableCopy];
+                    [current addEntriesFromDictionary:status[@"blockSettings"]];
+                    defaultsDict = current;
+                } else if (policyError && defaultsDict[@"WeeklyScheduleSavedConfiguration"]) {
+                    fprintf(stderr, "Could not read the saved shared policy. Open SelfControl before starting a block.\n");
+                    exit(EX_UNAVAILABLE);
+                }
+            }
+
             // read in the other block settings, starting with defaults
             NSDictionary* blockSettingsFromDefaults = @{
                 @"ClearCaches": defaultsDict[@"ClearCaches"],
@@ -238,6 +261,7 @@ int main(int argc, char* argv[]) {
             printf("SelfControl CLI Tool v%s\n", [SELFCONTROL_VERSION_STRING UTF8String]);
             printf("Usage: selfcontrol-cli [--uid <controlling user ID>] <command> [<args>]\n\n");
             printf("Valid commands:\n");
+            printf("\n    --browser-setup --> installs/updates the helper and prepares private Chrome integration\n");
             printf("\n    start --> starts a SelfControl block\n");
             printf("        --blocklist <path to saved blocklist file>\n");
             printf("        --enddate <specified end date for block in ISO8601 format>\n");

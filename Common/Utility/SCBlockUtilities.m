@@ -71,6 +71,8 @@
     [settings setValue: nil forKey: @"BlockEndDate"];
     [settings setValue: nil forKey: @"ActiveBlocklist"];
     [settings setValue: nil forKey: @"ActiveBlockAsWhitelist"];
+    [settings setValue:@NO forKey:@"ScheduleManagedBlock"];
+    [settings setValue:NSDate.distantPast forKey:@"ManualBlockEndDate"];
 }
 
 @end

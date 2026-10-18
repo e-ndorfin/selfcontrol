@@ -11,6 +11,19 @@ NS_ASSUME_NONNULL_BEGIN
 
 @protocol SCDaemonProtocol <NSObject>
 
+- (void)getWeeklyScheduleWithReply:(void (^)(NSDictionary *status))reply;
+- (void)setWeeklySchedule:(NSDictionary *)configuration authorization:(NSData *)authData reply:(void (^)(NSError *error))reply;
+- (void)setWeeklySchedule:(NSDictionary *)configuration friendPassword:(NSString *)password authorization:(NSData *)authData reply:(void (^)(NSError *error))reply;
+- (void)setSharedPolicy:(NSDictionary *)policy friendPassword:(NSString *)password authorization:(NSData *)authData reply:(void (^)(NSError *error))reply;
+- (void)setFriendPassword:(NSString *)password policy:(NSDictionary *)policy authorization:(NSData *)authData reply:(void (^)(NSError *error))reply;
+- (void)disableFriendPassword:(NSString *)password authorization:(NSData *)authData reply:(void (^)(NSError *error))reply;
+- (void)appendWeeklyWebsites:(NSArray<NSString *> *)entries authorization:(NSData *)authData reply:(void (^)(NSError *error))reply;
+
+- (void)requestWebsiteBreak:(NSString *)domain reply:(void (^)(NSError * _Nullable error))reply;
+
+- (void)appendBlockedWebsites:(NSArray<NSString *> *)domains reply:(void (^)(NSDictionary *result, NSError * _Nullable error))reply;
+- (void)prepareBrowserIntegration:(NSDictionary *)policy authorization:(NSData *)authorization reply:(void (^)(NSError * _Nullable error))reply;
+
 // XPC method to start block
 - (void)startBlockWithControllingUID:(uid_t)controllingUID blocklist:(NSArray<NSString*>*)blocklist isAllowlist:(BOOL)isAllowlist endDate:(NSDate*)endDate blockSettings:(NSDictionary*)blockSettings authorization:(NSData *)authData reply:(void(^)(NSError* error))reply;
 

@@ -46,6 +46,8 @@ OSStatus const AUTH_CANCELLED_STATUS = -60006;
             @"HighlightInvalidHosts": @YES,
             @"VerifyInternetConnection": @YES,
             @"TimerWindowFloats": @NO,
+            @"ShowMenuBarItem": @YES,
+            @"ShowMenuBarCountdown": @NO,
             @"BadgeApplicationIcon": @YES,
             @"BlockDuration": @1,
             @"MaxBlockLength": @1440,

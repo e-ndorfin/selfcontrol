@@ -82,21 +82,22 @@ BOOL appendMode = NO;
 	}
 }
 
-- (void)enterAppendMode {
+- (BOOL)enterAppendMode {
     if (isAllowlist) {
         NSLog(@"ERROR: can't append to allowlist block");
-        return;
+        return NO;
     }
     if(![hostBlockerSet.defaultBlocker containsSelfControlBlock]) {
         NSLog(@"ERROR: can't append to hosts block that doesn't yet exist");
-        return;
+        return NO;
     }
     
+    if (![pf enterAppendMode]) return NO;
     hostsBlockingEnabled = YES;
     appendMode = YES;
-    [pf enterAppendMode];
+    return YES;
 }
-- (void)finishAppending {
+- (BOOL)finishAppending {
     NSLog(@"BlockManager: About to run operation queue for appending...");
     NSDate* startedRunning  = [NSDate date];
     [opQueue waitUntilAllOperationsAreFinished];
@@ -104,10 +105,12 @@ BOOL appendMode = NO;
     NSTimeInterval runTime = [finishedRunning timeIntervalSinceDate: startedRunning];
     NSLog(@"BlockManager: Operation queue ran in %f seconds!", runTime);
 
-    [hostBlockerSet writeNewFileContents];
+    BOOL hostsWritten = [hostBlockerSet writeNewFileContents];
     [pf finishAppending];
-    [pf refreshPFRules];
+    int status = [pf refreshPFRules];
+    BOOL enteredAppendMode = appendMode;
     appendMode = NO;
+    return enteredAppendMode && hostsWritten && status == 0;
 }
 
 - (void)finalizeBlock {

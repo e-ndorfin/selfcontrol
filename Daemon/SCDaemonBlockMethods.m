@@ -7,6 +7,7 @@
 
 #import "SCDaemonBlockMethods.h"
 #import "SCSettings.h"
+#import "SCWebsiteBreak.h"
 #import "SCHelperToolUtilities.h"
 #import "PacketFilter.h"
 #import "BlockManager.h"
@@ -17,13 +18,17 @@
 NSTimeInterval METHOD_LOCK_TIMEOUT = 5.0;
 NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for checkups, because we'd prefer not to have tons pile up
 
+@interface SCDaemonBlockMethods ()
++ (void)restoreWebsiteBreakWhileLocked;
++ (void)updateBlockEndDate:(NSDate *)end scheduled:(BOOL)scheduled reply:(void (^)(NSError *))reply;
+@end
+
 @implementation SCDaemonBlockMethods
 
 + (NSLock*)daemonMethodLock {
     static NSLock* lock = nil;
-    if (lock == nil) {
-        lock = [[NSLock alloc] init];
-    }
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ lock = [[NSLock alloc] init]; });
     return lock;
 }
 
@@ -49,6 +54,10 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
 
 
 + (void)startBlockWithControllingUID:(uid_t)controllingUID blocklist:(NSArray<NSString*>*)blocklist isAllowlist:(BOOL)isAllowlist endDate:(NSDate*)endDate blockSettings:(NSDictionary*)blockSettings authorization:(NSData *)authData reply:(void(^)(NSError* error))reply {
+    [self startBlockWithControllingUID:controllingUID blocklist:blocklist isAllowlist:isAllowlist endDate:endDate blockSettings:blockSettings scheduled:NO authorization:authData reply:reply];
+}
+
++ (void)startBlockWithControllingUID:(uid_t)controllingUID blocklist:(NSArray<NSString*>*)blocklist isAllowlist:(BOOL)isAllowlist endDate:(NSDate*)endDate blockSettings:(NSDictionary*)blockSettings scheduled:(BOOL)scheduled authorization:(NSData *)authData reply:(void(^)(NSError* error))reply {
     if (![SCDaemonBlockMethods lockOrTimeout: reply]) {
         return;
     }
@@ -81,10 +90,16 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
     }
 
     SCSettings* settings = [SCSettings sharedSettings];
+    [settings setValue:@(controllingUID) forKey:@"BlockControllingUID"];
+    [settings setValue:@"" forKey:@"WebsiteBreakDomain"];
+    [settings setValue:NSDate.distantPast forKey:@"WebsiteBreakUntil"];
+    // The global cooldown survives new blocks and daemon restarts.
     // update SCSettings with the blocklist and end date that've been requested
     [settings setValue: blocklist forKey: @"ActiveBlocklist"];
     [settings setValue: @(isAllowlist) forKey: @"ActiveBlockAsWhitelist"];
     [settings setValue: endDate forKey: @"BlockEndDate"];
+    [settings setValue:@YES forKey:@"ScheduleManagedBlock"];
+    [settings setValue:scheduled ? NSDate.distantPast : endDate forKey:@"ManualBlockEndDate"];
     
     // update all the settings for the block, which we're basically just copying from defaults to settings
     [settings setValue: blockSettings[@"ClearCaches"] forKey: @"ClearCaches"];
@@ -132,83 +147,52 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
     [self.daemonMethodLock unlock];
 }
 
-+ (void)updateBlocklist:(NSArray<NSString*>*)newBlocklist authorization:(NSData *)authData reply:(void(^)(NSError* error))reply {
-    if (![SCDaemonBlockMethods lockOrTimeout: reply]) {
-        return;
-    }
-    
-    [SCSentry addBreadcrumb: @"Daemon method updateBlocklist called" category: @"daemon"];
-    if ([SCBlockUtilities legacyBlockIsRunning]) {
-        NSLog(@"ERROR: Can't update blocklist because a legacy block is running");
-        NSError* err = [SCErr errorWithCode: 303];
-        [SCSentry captureError: err];
-        reply(err);
-        [self.daemonMethodLock unlock];
-        return;
-    }
-    if (![SCBlockUtilities modernBlockIsRunning]) {
-        NSLog(@"ERROR: Can't update blocklist since block isn't running");
-        NSError* err = [SCErr errorWithCode: 304];
-        [SCSentry captureError: err];
-        reply(err);
-        [self.daemonMethodLock unlock];
-        return;
-    }
-    
-    SCSettings* settings = [SCSettings sharedSettings];
-        
-    if ([settings boolForKey: @"ActiveBlockAsWhitelist"]) {
-        NSLog(@"ERROR: Attempting to update active blocklist, but this is not possible with an allowlist block");
-        NSError* err = [SCErr errorWithCode: 305];
-        [SCSentry captureError: err];
-        reply(err);
-        [self.daemonMethodLock unlock];
-        return;
-    }
-    
-    NSArray* activeBlocklist = [settings valueForKey: @"ActiveBlocklist"];
-    NSMutableArray* added = [NSMutableArray arrayWithArray: newBlocklist];
-    [added removeObjectsInArray: activeBlocklist];
-    NSMutableArray* removed = [NSMutableArray arrayWithArray: activeBlocklist];
-    [removed removeObjectsInArray: newBlocklist];
-    
-    // throw a warning if something got removed for some reason, since we ignore them
-    if (removed.count > 0) {
-        NSLog(@"WARNING: Active blocklist has removed items; these will not be updated. Removed items are %@", removed);
-    }
-    
-    BlockManager* blockManager = [[BlockManager alloc] initAsAllowlist: [settings boolForKey: @"ActiveBlockAsWhitelist"]
-                                                            allowLocal: [settings boolForKey: @"EvaluateCommonSubdomains"]
-                                               includeCommonSubdomains: [settings boolForKey: @"AllowLocalNetworks"]
-                                                  includeLinkedDomains: [settings boolForKey: @"IncludeLinkedDomains"]];
-    [blockManager enterAppendMode];
-    [blockManager addBlockEntriesFromStrings: added];
-    [blockManager finishAppending];
-    
-    [settings setValue: newBlocklist forKey: @"ActiveBlocklist"];
-    
-    // make sure everyone knows about our new list
-    NSError* syncErr = [settings syncSettingsAndWait: 5];
-    if (syncErr != nil) {
-        NSLog(@"WARNING: Sync failed or timed out with error %@ after updating blocklist", syncErr);
-        [SCSentry captureError: syncErr];
-    }
-
-    [SCHelperToolUtilities sendConfigurationChangedNotification];
-
-    // Clear all caches if the user has the correct preference set, so
-    // that blocked pages are not loaded from a cache.
-    [SCHelperToolUtilities clearCachesIfRequested];
-
-    [SCSentry addBreadcrumb: @"Daemon updated blocklist successfully" category: @"daemon"];
-    NSLog(@"INFO: Blocklist successfully updated.");
-    reply(nil);
-
-    [[SCDaemon sharedDaemon] resetInactivityTimer];
++ (void)updateBlocklist:(NSArray<NSString *> *)newBlocklist authorization:(NSData *)authData reply:(void (^)(NSError *))reply {
+    if (![self lockOrTimeout:reply]) return;
+    NSError *error = [self appendBlocklistWhileLocked:newBlocklist];
     [self.daemonMethodLock unlock];
+    reply(error);
+}
+
++ (NSError *)appendBlocklistWhileLocked:(NSArray<NSString *> *)domains {
+    if ([SCBlockUtilities legacyBlockIsRunning]) return [SCErr errorWithCode:303];
+    if (![SCBlockUtilities modernBlockIsRunning]) return [SCErr errorWithCode:304];
+    SCSettings *settings = SCSettings.sharedSettings;
+    if ([settings boolForKey:@"ActiveBlockAsWhitelist"]) return [SCErr errorWithCode:305];
+    NSArray *active = [settings valueForKey:@"ActiveBlocklist"] ?: @[];
+    NSMutableOrderedSet *effective = [NSMutableOrderedSet orderedSetWithArray:active];
+    [effective addObjectsFromArray:domains];
+    NSMutableArray *added = [effective.array mutableCopy];
+    [added removeObjectsInArray:active];
+    if (!added.count) return [settings syncSettingsAndWait:5];
+    BlockManager *manager = [[BlockManager alloc] initAsAllowlist:NO
+        allowLocal:[settings boolForKey:@"AllowLocalNetworks"]
+        includeCommonSubdomains:[settings boolForKey:@"EvaluateCommonSubdomains"]
+        includeLinkedDomains:[settings boolForKey:@"IncludeLinkedDomains"]];
+    if (![manager enterAppendMode]) return [NSError errorWithDomain:@"SelfControl.Browser" code:2
+        userInfo:@{NSLocalizedDescriptionKey:@"The active network rules are unavailable. Open SelfControl to repair them."}];
+    [manager addBlockEntriesFromStrings:SCWebsiteBreakFilteredList(added, [settings valueForKey:@"WebsiteBreakDomain"],
+        [settings valueForKey:@"WebsiteBreakUntil"], NSDate.date, NO)];
+    if (![manager finishAppending]) {
+        return [NSError errorWithDomain:@"SelfControl.Browser" code:1 userInfo:@{NSLocalizedDescriptionKey:@"Could not append the active network rules. Click again to retry."}];
+    }
+    [settings setValue:effective.array forKey:@"ActiveBlocklist"];
+    NSError *error = [settings syncSettingsAndWait:5];
+    [SCHelperToolUtilities sendConfigurationChangedNotification];
+    [SCHelperToolUtilities clearCachesIfRequested];
+    [[SCDaemon sharedDaemon] resetInactivityTimer];
+    return error;
 }
 
 + (void)updateBlockEndDate:(NSDate*)newEndDate authorization:(NSData *)authData reply:(void(^)(NSError* error))reply {
+    [self updateBlockEndDate:newEndDate scheduled:NO reply:reply];
+}
+
++ (void)extendScheduledBlockTo:(NSDate *)end reply:(void (^)(NSError *))reply {
+    [self updateBlockEndDate:end scheduled:YES reply:reply];
+}
+
++ (void)updateBlockEndDate:(NSDate *)newEndDate scheduled:(BOOL)scheduled reply:(void (^)(NSError *))reply {
     if (![SCDaemonBlockMethods lockOrTimeout: reply]) {
         return;
     }
@@ -244,6 +228,7 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
         [SCSentry captureError: err];
         reply(err);
         [self.daemonMethodLock unlock];
+        return;
     }
     if ([newEndDate timeIntervalSinceDate: currentEndDate] > 86400) { // 86400 seconds = 1 day
         NSLog(@"ERROR: Can't extend block end date by more than 1 day at a time");
@@ -251,9 +236,14 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
         [SCSentry captureError: err];
         reply(err);
         [self.daemonMethodLock unlock];
+        return;
     }
     
     [settings setValue: newEndDate forKey: @"BlockEndDate"];
+    if (!scheduled) {
+        [settings setValue:@YES forKey:@"ScheduleManagedBlock"];
+        [settings setValue:newEndDate forKey:@"ManualBlockEndDate"];
+    }
     
     // make sure everyone knows about our new end date
     NSError* syncErr = [settings syncSettingsAndWait: 5];
@@ -270,6 +260,114 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
     
     [[SCDaemon sharedDaemon] resetInactivityTimer];
     [self.daemonMethodLock unlock];
+}
+
++ (NSError *)applyApprovedPolicyWhileLocked:(NSDictionary *)policy endDate:(NSDate *)end {
+    if (![SCBlockUtilities anyBlockIsRunning]) return nil;
+    if ([SCBlockUtilities legacyBlockIsRunning])
+        return [NSError errorWithDomain:@"SelfControl.Schedule" code:3 userInfo:@{NSLocalizedDescriptionKey:@"This block was started by an older SelfControl version. Its rules cannot be edited until it ends."}];
+    SCSettings *settings = SCSettings.sharedSettings;
+    NSMutableDictionary *before = [NSMutableDictionary new];
+    NSArray *keys = [@[@"ActiveBlocklist", @"ActiveBlockAsWhitelist", @"BlockEndDate", @"BlockIsRunning", @"ScheduleManagedBlock", @"ManualBlockEndDate"] arrayByAddingObjectsFromArray:[policy[@"blockSettings"] allKeys]];
+    for (NSString *key in keys) before[key] = [settings valueForKey:key];
+    BOOL keepRunning = end.timeIntervalSinceNow > 0 && ([policy[@"isAllowlist"] boolValue] || [policy[@"blocklist"] count] > 0);
+    BOOL rebuild = ![before[@"ActiveBlocklist"] isEqual:policy[@"blocklist"]] ||
+        [before[@"ActiveBlockAsWhitelist"] boolValue] != [policy[@"isAllowlist"] boolValue];
+    for (NSString *key in @[@"AllowLocalNetworks", @"EvaluateCommonSubdomains", @"IncludeLinkedDomains"])
+        rebuild |= ![before[key] isEqual:policy[@"blockSettings"][key]];
+    if (!keepRunning || rebuild) {
+        if (![[BlockManager new] clearBlock]) {
+            [SCHelperToolUtilities installBlockRulesFromSettings];
+            return [NSError errorWithDomain:@"SelfControl.Schedule" code:4 userInfo:@{NSLocalizedDescriptionKey:@"Could not replace the active firewall rules. The previous block was restored."}];
+        }
+    }
+    if (keepRunning) {
+        [settings setValue:policy[@"blocklist"] forKey:@"ActiveBlocklist"];
+        [settings setValue:policy[@"isAllowlist"] forKey:@"ActiveBlockAsWhitelist"];
+        [settings setValue:end forKey:@"BlockEndDate"];
+        [policy[@"blockSettings"] enumerateKeysAndObjectsUsingBlock:^(NSString *key, id value, BOOL *stop) { [settings setValue:value forKey:key]; }];
+    } else {
+        [SCBlockUtilities removeBlockFromSettings];
+        [settings setValue:@NO forKey:@"ScheduleManagedBlock"];
+        [settings setValue:NSDate.distantPast forKey:@"ManualBlockEndDate"];
+    }
+    NSError *error = [settings syncSettingsAndWait:5];
+    if (!error && keepRunning && rebuild) {
+        [SCHelperToolUtilities installBlockRulesFromSettings];
+        if (![[BlockManager new] blockIsActive]) error = [NSError errorWithDomain:@"SelfControl.Schedule" code:5 userInfo:@{NSLocalizedDescriptionKey:@"Could not install the revised firewall rules."}];
+    }
+    if (error) {
+        if (rebuild || !keepRunning) [[BlockManager new] clearBlock];
+        [before enumerateKeysAndObjectsUsingBlock:^(NSString *key, id value, BOOL *stop) { [settings setValue:value forKey:key]; }];
+        [settings syncSettingsAndWait:5];
+        if (rebuild || !keepRunning) [SCHelperToolUtilities installBlockRulesFromSettings];
+        [SCHelperToolUtilities sendConfigurationChangedNotification];
+        return error;
+    }
+    if (!keepRunning) [[SCDaemon sharedDaemon] stopCheckupTimer];
+    if (rebuild || !keepRunning) [SCHelperToolUtilities clearOSDNSCache];
+    [SCHelperToolUtilities sendConfigurationChangedNotification];
+    [[SCDaemon sharedDaemon] resetInactivityTimer];
+    return nil;
+}
+
+// All callers hold daemonMethodLock. Keep the pending marker until rules are restored,
+// so a failed restore is retried by the next checkup, including after daemon restart.
++ (void)restoreWebsiteBreakWhileLocked {
+    SCSettings *settings = SCSettings.sharedSettings;
+    [settings setValue:NSDate.distantPast forKey:@"WebsiteBreakUntil"];
+    [settings syncSettingsAndWait:5];
+    if (![[BlockManager new] clearBlock]) {
+        [SCHelperToolUtilities installBlockRulesFromSettings];
+        return;
+    }
+    [SCHelperToolUtilities installBlockRulesFromSettings];
+    if (![[BlockManager new] blockIsActive]) return;
+    [settings setValue:@"" forKey:@"WebsiteBreakDomain"];
+    [settings syncSettingsAndWait:5];
+    [SCHelperToolUtilities clearOSDNSCache];
+    [SCHelperToolUtilities sendConfigurationChangedNotification];
+}
+
++ (void)requestWebsiteBreak:(NSString *)requested controllingUID:(uid_t)uid reply:(void (^)(NSError *))reply {
+    if (![self lockOrTimeout:reply]) return;
+    SCSettings *settings = SCSettings.sharedSettings;
+    NSString *domain = SCWebsiteBreakDomain(requested);
+    NSString *message = nil;
+    NSDate *now = NSDate.date;
+    NSArray *sites = [settings valueForKey:@"ActiveBlocklist"];
+    if (!uid || uid != [[settings valueForKey:@"BlockControllingUID"] unsignedIntValue])
+        message = @"This block belongs to another Mac user. Older blocks must finish before website breaks are available.";
+    else if (![SCBlockUtilities modernBlockIsRunning] || [SCBlockUtilities currentBlockIsExpired] || [settings boolForKey:@"ActiveBlockAsWhitelist"])
+        message = @"Website breaks require an active website blocklist.";
+    else if ([[settings valueForKey:@"WebsiteBreakNextAvailable"] compare:now] == NSOrderedDescending)
+        message = @"A website break is available once every 30 minutes. Wait until the cooldown ends.";
+    else if (!domain || [sites indexOfObjectPassingTest:^BOOL(NSString *site, NSUInteger index, BOOL *stop) {
+        return [SCWebsiteBreakDomain(site) isEqualToString:domain];
+    }] == NSNotFound)
+        message = @"Choose a website from the active blocklist. IP addresses and port-specific rules do not support breaks.";
+    NSError *error;
+    if (message) error = [NSError errorWithDomain:@"SelfControl.WebsiteBreak" code:1 userInfo:@{NSLocalizedDescriptionKey:message}];
+    if (!error) {
+        // Persist the cooldown before changing network rules. Repeated/concurrent requests
+        // and app restarts cannot extend the break or reset its allowance.
+        [settings setValue:domain forKey:@"WebsiteBreakDomain"];
+        [settings setValue:[now dateByAddingTimeInterval:120] forKey:@"WebsiteBreakUntil"];
+        [settings setValue:[now dateByAddingTimeInterval:1800] forKey:@"WebsiteBreakNextAvailable"];
+        error = [settings syncSettingsAndWait:5];
+        if (!error && ![[BlockManager new] clearBlock])
+            error = [NSError errorWithDomain:@"SelfControl.WebsiteBreak" code:2 userInfo:@{NSLocalizedDescriptionKey:@"Could not update the network rules. Please try again later."}];
+        if (!error) {
+            [SCHelperToolUtilities installBlockRulesFromSettings];
+            if (![[BlockManager new] blockIsActive])
+                error = [NSError errorWithDomain:@"SelfControl.WebsiteBreak" code:3 userInfo:@{NSLocalizedDescriptionKey:@"Could not install the temporary network rules."}];
+        }
+        if (error) [self restoreWebsiteBreakWhileLocked];
+        [SCHelperToolUtilities clearOSDNSCache];
+        [SCHelperToolUtilities sendConfigurationChangedNotification];
+    }
+    [self.daemonMethodLock unlock];
+    reply(error);
 }
 
 + (void)checkupBlock {
@@ -321,6 +419,9 @@ NSTimeInterval CHECKUP_LOCK_TIMEOUT = 0.5; // use a shorter lock timeout for che
 
         // once the checkups stop, the daemon will clear itself in a while due to inactivity
         [[SCDaemon sharedDaemon] stopCheckupTimer];
+    } else if ([[SCSettings.sharedSettings valueForKey:@"WebsiteBreakDomain"] length] &&
+        [[SCSettings.sharedSettings valueForKey:@"WebsiteBreakUntil"] timeIntervalSinceNow] <= 0) {
+        [self restoreWebsiteBreakWhileLocked];
     } else if ([[NSDate date] timeIntervalSinceDate: lastBlockIntegrityCheck] > integrityCheckIntervalSecs) {
         lastBlockIntegrityCheck = [NSDate date];
         // The block is still on.  Every once in a while, we should

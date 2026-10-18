@@ -80,10 +80,10 @@ static NSDictionary* kAuthorizationRuleAuthenticateAsAdmin2MinTimeout;
             @"group": @"admin",
             @"timeout": @(120), // 2 minutes
             @"shared": @(YES),
-            @"version": @1, // not entirely sure what this does TBH
-            // Enable Touch ID and other biometric authentication on macOS 10.12.2+
-            // The authenticate mechanism supports Touch ID when available
-            @"mechanisms": @[@"builtin:authenticate"]
+            @"version": @2
+            // Let macOS choose its complete authentication mechanism chain.
+            // builtin:authenticate alone collects credentials without verifying
+            // them or returning a UID, so every password attempt is rejected.
         };
     }
     
@@ -111,7 +111,14 @@ static NSDictionary* kAuthorizationRuleAuthenticateAsAdmin2MinTimeout;
         sCommandInfo = @{
             NSStringFromSelector(@selector(startBlockWithControllingUID:blocklist:isAllowlist:endDate:blockSettings:authorization:reply:)) : startBlockCommandInfo,
             NSStringFromSelector(@selector(updateBlocklist:authorization:reply:)) : modifyBlockCommandInfo,
-            NSStringFromSelector(@selector(updateBlockEndDate:authorization:reply:)) : modifyBlockCommandInfo
+            NSStringFromSelector(@selector(updateBlockEndDate:authorization:reply:)) : modifyBlockCommandInfo,
+            NSStringFromSelector(@selector(setWeeklySchedule:authorization:reply:)) : startBlockCommandInfo,
+            NSStringFromSelector(@selector(setWeeklySchedule:friendPassword:authorization:reply:)) : startBlockCommandInfo,
+            NSStringFromSelector(@selector(setSharedPolicy:friendPassword:authorization:reply:)) : modifyBlockCommandInfo,
+            NSStringFromSelector(@selector(setFriendPassword:policy:authorization:reply:)) : modifyBlockCommandInfo,
+            NSStringFromSelector(@selector(disableFriendPassword:authorization:reply:)) : modifyBlockCommandInfo,
+            NSStringFromSelector(@selector(prepareBrowserIntegration:authorization:reply:)) : modifyBlockCommandInfo,
+            NSStringFromSelector(@selector(appendWeeklyWebsites:authorization:reply:)) : modifyBlockCommandInfo
             #pragma clang diagnostic pop
         };
     });
@@ -158,18 +165,35 @@ static NSDictionary* kAuthorizationRuleAuthenticateAsAdmin2MinTimeout;
         // First get the right.  If we get back errAuthorizationDenied that means there's
         // no current definition, so we add our default one.
         
-        blockErr = AuthorizationRightGet([authRightName UTF8String], NULL);
-        if (blockErr == errAuthorizationDenied) {
+        CFDictionaryRef existingDefinition = NULL;
+        blockErr = AuthorizationRightGet([authRightName UTF8String], &existingDefinition);
+        NSDictionary *existing = CFBridgingRelease(existingDefinition);
+        BOOL repairIncompleteAuthentication = blockErr == errAuthorizationSuccess &&
+            [existing[@"class"] isEqual:@"user"] && [existing[@"group"] isEqual:@"admin"] &&
+            [existing[@"mechanisms"] isEqual:@[@"builtin:authenticate"]];
+        if (blockErr == errAuthorizationDenied || repairIncompleteAuthentication) {
+            id definition = authRightDefault;
+            if (repairIncompleteAuthentication) {
+                // Repair only this known broken SelfControl rule, preserving
+                // any other administrator-supplied policy settings.
+                NSMutableDictionary *repaired = [existing mutableCopy];
+                [repaired removeObjectForKey:@"mechanisms"];
+                for (NSString *key in @[@"created", @"modified", @"identifier", @"requirement"]) [repaired removeObjectForKey:key];
+                repaired[@"version"] = @2;
+                definition = repaired;
+            }
             NSLog(@"setting auth right default for %@: %@", authRightName, authRightDefault);
             blockErr = AuthorizationRightSet(
                 authRef,                                    // authRef
                 [authRightName UTF8String],                 // rightName
-                (__bridge CFTypeRef) authRightDefault,      // rightDefinition
+                (__bridge CFTypeRef) definition,            // rightDefinition
                 (__bridge CFStringRef) authRightDesc,       // descriptionKey
                 NULL,                                       // bundle (NULL implies main bundle)
-                CFSTR("SCXPCAuthorization")                             // localeTableName
+                CFSTR("SCXPCAuthorization")
             );
-            assert(blockErr == errAuthorizationSuccess);
+            if (blockErr != errAuthorizationSuccess) {
+                NSLog(@"Could not register administrator authorization for %@ (status %d).", authRightName, (int)blockErr);
+            }
         } else {
             // A right already exists (err == noErr) or any other error occurs, we
             // assume that it has been set up in advance by the system administrator or

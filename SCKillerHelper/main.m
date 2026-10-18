@@ -25,6 +25,14 @@ int main(int argc, char* argv[]) {
         [SCSentry startSentry: @"com.selfcontrolapp.SCKillerHelper"];
         
         // make sure to expand the tilde before we setuid to 0, otherwise this won't work
+        NSString *protectedPath = @"/Library/Application Support/SelfControl/WeeklySchedule.plist";
+        NSDictionary *protectedSettings = [NSDictionary dictionaryWithContentsOfFile:protectedPath];
+        if (protectedSettings[@"friendProtection"] ||
+            (!protectedSettings && [NSFileManager.defaultManager fileExistsAtPath:protectedPath])) {
+            // Recovery must not become a Mac-admin password reset or an early-unblock route.
+            NSLog(@"Friend protection is enabled. Turn off password protection with the friend's password before using block recovery.");
+            exit(EX_NOPERM);
+        }
         NSString* logFilePath = [LOG_FILE stringByExpandingTildeInPath];
         NSMutableString* log = [NSMutableString stringWithString: @"===SelfControl-Killer Log File===\n\n"];
 

@@ -31,3 +31,6 @@ xcuserdata/**/*
 !xcuserdata/**/xcschemes/*
 
 *.moved-aside
+
+# Python installer/test caches
+__pycache__/

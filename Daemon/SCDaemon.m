@@ -10,6 +10,7 @@
 #import "SCDaemonXPC.h"
 #import"SCDaemonBlockMethods.h"
 #import "SCFileWatcher.h"
+#import "SCScheduleService.h"
 
 static NSString* serviceName = @"org.eyebeam.selfcontrold";
 float const INACTIVITY_LIMIT_SECS = 60 * 2; // 2 minutes
@@ -52,6 +53,7 @@ float const INACTIVITY_LIMIT_SECS = 60 * 2; // 2 minutes
 
 - (void)start {
     [self.listener resume];
+    [[SCScheduleService sharedService] start];
 
     // if there's any evidence of a block (i.e. an official one running,
     // OR just block remnants remaining in hosts), we should start
@@ -108,6 +110,7 @@ float const INACTIVITY_LIMIT_SECS = 60 * 2; // 2 minutes
 
 - (void)startInactivityTimer {
     self.inactivityTimer = [NSTimer scheduledTimerWithTimeInterval: 15.0 repeats: YES block:^(NSTimer * _Nonnull timer) {
+        if ([SCScheduleService sharedService].enabled || [SCScheduleService sharedService].friendProtectionEnabled) return;
         // we haven't had any activity in a while, the daemon appears to be idling
         // so kill it to avoid the user having unnecessary processes running!
         if ([[NSDate date] timeIntervalSinceDate: self.lastActivityDate] > INACTIVITY_LIMIT_SECS) {
@@ -159,7 +162,7 @@ float const INACTIVITY_LIMIT_SECS = 60 * 2; // 2 minutes
     SecRequirementRef isSelfControlApp;
     // versions before 4.0 didn't have hardened code signing, so aren't trustworthy to talk to the daemon
     // (plus the daemon didn't exist before 4.0 so there's really no reason they should want to run it!)
-    SecRequirementCreateWithString(CFSTR("anchor apple generic and (identifier \"org.eyebeam.SelfControl\" or identifier \"org.eyebeam.selfcontrol-cli\") and info [CFBundleVersion] >= \"407\" and (certificate leaf[field.1.2.840.113635.100.6.1.9] /* exists */ or certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = EG6ZYP3AQH)"), kSecCSDefaultFlags, &isSelfControlApp);
+    SecRequirementCreateWithString(CFSTR("anchor apple generic and (identifier \"org.eyebeam.SelfControl\" or identifier \"org.eyebeam.selfcontrol-cli\") and info [CFBundleVersion] >= \"407\" and certificate leaf = H\"DF6AD4A6A9E4054D4E46FBC54B8FE3C50CFBDC32\""), kSecCSDefaultFlags, &isSelfControlApp);
     OSStatus clientValidityStatus = SecCodeCheckValidity(guest, kSecCSDefaultFlags, isSelfControlApp);
     
     CFRelease(guest);
@@ -173,6 +176,7 @@ float const INACTIVITY_LIMIT_SECS = 60 * 2; // 2 minutes
     }
     
     SCDaemonXPC* scdXPC = [[SCDaemonXPC alloc] init];
+    scdXPC.requestingUID = newConnection.effectiveUserIdentifier;
     newConnection.exportedInterface = [NSXPCInterface interfaceWithProtocol: @protocol(SCDaemonProtocol)];
     newConnection.exportedObject = scdXPC;
 

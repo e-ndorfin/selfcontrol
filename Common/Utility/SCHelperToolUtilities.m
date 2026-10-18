@@ -7,6 +7,7 @@
 
 #import "SCHelperToolUtilities.h"
 #import "BlockManager.h"
+#import "SCWebsiteBreak.h"
 #import <ServiceManagement/ServiceManagement.h>
 
 @implementation SCHelperToolUtilities
@@ -25,7 +26,9 @@
     NSLog(@"About to run BlockManager commands");
     
     [blockManager prepareToAddBlock];
-    [blockManager addBlockEntriesFromStrings: [settings valueForKey: @"ActiveBlocklist"]];
+    NSArray *sites = SCWebsiteBreakFilteredList([settings valueForKey:@"ActiveBlocklist"],
+        [settings valueForKey:@"WebsiteBreakDomain"], [settings valueForKey:@"WebsiteBreakUntil"], NSDate.date, blockAsAllowlist);
+    [blockManager addBlockEntriesFromStrings:sites];
     [blockManager finalizeBlock];
 
 }

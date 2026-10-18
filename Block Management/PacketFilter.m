@@ -118,20 +118,21 @@ NSFileHandle* appendFileHandle;
 	[filterConfiguration writeToFile: @"/etc/pf.anchors/org.eyebeam" atomically: true encoding: NSUTF8StringEncoding error: nil];
 }
 
-- (void)enterAppendMode {
+- (BOOL)enterAppendMode {
     if (isAllowlist) {
         NSLog(@"WARNING: Can't append rules to allowlist blocks - ignoring");
-        return;
+        return NO;
     }
 
     // open the file and prepare to write to the very bottom (no footer since it's not an allowlist)
     appendFileHandle = [NSFileHandle fileHandleForWritingAtPath: @"/etc/pf.anchors/org.eyebeam"];
     if (!appendFileHandle) {
         NSLog(@"ERROR: Failed to get handle for pf.anchors file while attempting to append rules");
-        return;
+        return NO;
     }
 
     [appendFileHandle seekToEndOfFile];
+    return YES;
 }
 - (void)finishAppending {
     [appendFileHandle closeFile];

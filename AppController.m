@@ -32,10 +32,15 @@
 #import "SCBlockFileReaderWriter.h"
 #import "SCUIUtilities.h"
 #import <TransformerKit/NSValueTransformer+TransformerKit.h>
+#import "SCWeeklyScheduleViewController.h"
+#import "SCWebsiteBreak.h"
+#import "SCStatusItemController.h"
 
-@interface AppController () {}
+@interface AppController () <SCStatusItemControllerDelegate>
 
 @property (atomic, strong, readwrite) SCXPCClient* xpc;
+@property SCWeeklyScheduleViewController *scheduleController;
+@property SCStatusItemController *statusItemController;
 
 @end
 
@@ -79,6 +84,12 @@
 }
 
 - (IBAction)addBlock:(id)sender {
+    [self.scheduleController refreshSharedPolicyFromDaemonWithCompletion:^(NSError *error) {
+        if (error) { [SCUIUtilities presentError:error]; return; }
+        [self startManualBlockAfterPolicyRefresh:sender];
+    }];
+}
+- (void)startManualBlockAfterPolicyRefresh:(id)sender {
     if ([SCUIUtilities blockIsRunning]) {
 		// This method shouldn't be getting called, a block is on so the Start button should be disabled.
         NSError* err = [SCErr errorWithCode: 104];
@@ -113,7 +124,9 @@
 
 	[timerWindowController_ resetStrikes];
 
-	[NSThread detachNewThreadSelector: @selector(installBlock) toTarget: self withObject: nil];
+	[self.scheduleController syncSharedPolicyIfNeededWithCompletion:^(BOOL approved) {
+        if (approved) [NSThread detachNewThreadSelector:@selector(installBlock) toTarget:self withObject:nil];
+    }];
 }
 
 // returns YES if we should continue with the block, NO if we should cancel it
@@ -180,10 +193,12 @@
 	blockIsOn = [SCUIUtilities blockIsRunning];
 
 	if(blockIsOn) { // block is on
+		[blockDurationSlider_ setEnabled:NO];
+		[submitButton_ setEnabled:NO];
+		[editBlocklistButton_ setEnabled:![SCBlockUtilities legacyBlockIsRunning]];
 		if(!blockWasOn) { // if we just switched states to on...
 			[self closeTimerWindow];
 			[self showTimerWindow];
-			[initialWindow_ close];
 			[self closeDomainList];
             
             // apparently, a block is running, so make sure FirstBlockStarted is true
@@ -269,9 +284,20 @@
     editBlocklistMenuItem_.title = editListString;
 
 	[refreshUILock_ unlock];
+    [self.scheduleController refresh];
+    [self.statusItemController refresh];
 }
 
+- (void)handleDaemonConfigurationChangedNotification {
+    [self.scheduleController refreshSharedPolicyFromDaemonWithCompletion:^(NSError *error) {
+        if (!error) [self refreshConfigurationViews];
+    }];
+}
 - (void)handleConfigurationChangedNotification {
+    [self refreshConfigurationViews];
+    [self.scheduleController syncSharedPolicyIfNeededWithCompletion:nil];
+}
+- (void)refreshConfigurationViews {
     [SCSentry addBreadcrumb: @"Received configuration changed notification" category: @"app"];
     // if our configuration changed, we should assume the settings may have changed
     [[SCSettings sharedSettings] reloadSettings];
@@ -286,7 +312,7 @@
     
     // let the domain list know!
     if (domainListWindowController_ != nil) {
-        domainListWindowController_.readOnly = [SCUIUtilities blockIsRunning];
+        domainListWindowController_.readOnly = [SCBlockUtilities legacyBlockIsRunning];
         [domainListWindowController_ refreshDomainList];
     }
     
@@ -305,6 +331,7 @@
 	if(timerWindowController_ == nil) {
         [[NSBundle mainBundle] loadNibNamed: @"TimerWindow" owner: self topLevelObjects: nil];
 	} else {
+		[[timerWindowController_ window] deminiaturize:self];
 		[[timerWindowController_ window] makeKeyAndOrderFront: self];
 		[[timerWindowController_ window] center];
 	}
@@ -313,6 +340,14 @@
 - (void)closeTimerWindow {
 	[timerWindowController_ close];
 	timerWindowController_ = nil;
+}
+
+- (IBAction)showSchedule:(id)sender {
+    NSTabView *tabs = (NSTabView *)initialWindow_.contentView;
+    [tabs selectTabViewItemWithIdentifier:@"schedule"];
+    [self.scheduleController refresh];
+    [initialWindow_ deminiaturize:self];
+    [initialWindow_ makeKeyAndOrderFront:self];
 }
 
 - (IBAction)openPreferences:(id)sender {
@@ -337,11 +372,107 @@
 	[getStartedWindowController showWindow: nil];
 }
 
+- (void)applicationDidBecomeActive:(NSNotification *)notification {
+    [self handleDaemonConfigurationChangedNotification];
+}
+
+- (SCStatusItemState *)stateForStatusItemController:(SCStatusItemController *)controller {
+    [settings_ reloadSettings];
+    NSDate *now = NSDate.date;
+    BOOL modern = [SCBlockUtilities modernBlockIsRunning];
+    BOOL legacy = !modern && [SCBlockUtilities legacyBlockIsRunning];
+    NSDate *end = modern ? [settings_ valueForKey:@"BlockEndDate"] : legacy ? [SCMigrationUtilities legacyBlockEndDate] : nil;
+    SCStatusItemBlockPhase block = modern ? SCStatusItemBlockModern : legacy ? SCStatusItemBlockLegacy : SCStatusItemBlockIdle;
+    if ((modern || legacy) && (!end || [end compare:now] != NSOrderedDescending)) block = SCStatusItemBlockFinishing;
+    BOOL allowlist = modern ? [settings_ boolForKey:@"ActiveBlockAsWhitelist"] : [defaults_ boolForKey:@"BlockAsWhitelist"];
+    NSDate *until = [settings_ valueForKey:@"WebsiteBreakUntil"];
+    NSDate *next = [settings_ valueForKey:@"WebsiteBreakNextAvailable"];
+    SCWebsiteBreakPhase websiteBreak = SCWebsiteBreakPhaseAtDate(block == SCStatusItemBlockModern, allowlist, timerWindowController_.websiteBreakPending, until, next, now);
+    SCStatusItemBreakPhase breakPhase;
+    switch (websiteBreak) {
+        case SCWebsiteBreakReady: breakPhase = SCStatusItemBreakReady; break;
+        case SCWebsiteBreakPending: breakPhase = SCStatusItemBreakPending; break;
+        case SCWebsiteBreakActive: breakPhase = SCStatusItemBreakActive; break;
+        case SCWebsiteBreakCooldown: breakPhase = SCStatusItemBreakCooldown; break;
+        default: breakPhase = SCStatusItemBreakUnavailable; break;
+    }
+    return [[SCStatusItemState alloc] initWithBlockPhase:block breakPhase:breakPhase blockEndDate:end breakTransitionDate:websiteBreak == SCWebsiteBreakActive ? until : next allowlist:allowlist busy:self.addingBlock || timerWindowController_.window.attachedSheet != nil];
+}
+
+- (void)statusItemControllerWillHide:(SCStatusItemController *)controller {
+    BOOL visible = NO;
+    for (NSWindow *window in NSApp.windows) if (window.visible && window.canBecomeKeyWindow) { visible = YES; break; }
+    if (!visible) [self showBlockSetup];
+}
+- (void)statusItemControllerWillOpenMenu:(SCStatusItemController *)controller {
+    [settings_ reloadSettings];
+}
+- (void)showBlockSetup {
+    [(NSTabView *)initialWindow_.contentView selectTabViewItemWithIdentifier:@"manual"];
+    [initialWindow_ deminiaturize:self];
+    [initialWindow_ makeKeyAndOrderFront:self];
+}
+- (void)statusItemController:(SCStatusItemController *)controller performCommand:(SCStatusItemCommand)command {
+    SCStatusItemState *state = [self stateForStatusItemController:controller];
+    if (command == SCStatusItemCommandQuit) { [NSApp terminate:self]; return; }
+    [NSApp activateIgnoringOtherApps:YES];
+    switch (command) {
+        case SCStatusItemCommandAddWebsites:
+            if (state.blockPhase != SCStatusItemBlockModern || state.busy) break;
+            if (state.allowlist) break;
+            [self showTimerWindow];
+            [timerWindowController_ addToBlock:self];
+            break;
+        case SCStatusItemCommandOpen:
+            if (state.blockPhase == SCStatusItemBlockIdle) [self showBlockSetup]; else [self showTimerWindow];
+            break;
+        case SCStatusItemCommandPreferences: [self openPreferences:self]; break;
+        default: break;
+    }
+}
+
 - (void)applicationWillFinishLaunching:(NSNotification *)notification {
     // For test runs, we don't want to pop up the dialog to move to the Applications folder, as it breaks the tests
     if (NSProcessInfo.processInfo.environment[@"XCTestConfigurationFilePath"] == nil) {
         PFMoveToApplicationsFolderIfNecessary();
     }
+}
+
+- (void)configureMainSections {
+    NSView *manualControls = initialWindow_.contentView;
+    NSTabView *tabs = [[NSTabView alloc] initWithFrame:NSMakeRect(0, 0, 1000, 840)];
+    tabs.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    self.scheduleController = [[SCWeeklyScheduleViewController alloc] initWithClient:self.xpc];
+    __weak typeof(self) weakSelf = self;
+    self.scheduleController.editBlocklist = ^{ [weakSelf showDomainList:nil]; };
+    NSTabViewItem *schedule = [[NSTabViewItem alloc] initWithIdentifier:@"schedule"];
+    schedule.label = @"Schedule"; schedule.view = self.scheduleController.view;
+    [tabs addTabViewItem:schedule];
+    NSTabViewItem *manual = [[NSTabViewItem alloc] initWithIdentifier:@"manual"];
+    manual.label = @"Block now";
+    NSView *manualView = [[NSView alloc] initWithFrame:tabs.bounds];
+    NSTextField *title = [NSTextField labelWithString:@"Block now"];
+    title.font = [NSFont systemFontOfSize:25 weight:NSFontWeightSemibold];
+    NSTextField *description = [NSTextField labelWithString:@"Start a timer whenever you need it. Your weekly schedule continues in the background."];
+    description.font = [NSFont systemFontOfSize:12]; description.textColor = NSColor.secondaryLabelColor;
+    for (NSView *view in @[title, description, manualControls]) { view.translatesAutoresizingMaskIntoConstraints = NO; [manualView addSubview:view]; }
+    [NSLayoutConstraint activateConstraints:@[
+        [title.leadingAnchor constraintEqualToAnchor:manualView.leadingAnchor constant:24],
+        [title.topAnchor constraintEqualToAnchor:manualView.topAnchor constant:24],
+        [description.leadingAnchor constraintEqualToAnchor:title.leadingAnchor],
+        [description.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:10],
+        [manualControls.topAnchor constraintEqualToAnchor:description.bottomAnchor constant:30],
+        [manualControls.centerXAnchor constraintEqualToAnchor:manualView.centerXAnchor],
+        [manualControls.widthAnchor constraintEqualToConstant:620],
+        [manualControls.heightAnchor constraintEqualToConstant:154]
+    ]];
+    manual.view = manualView; [tabs addTabViewItem:manual];
+    initialWindow_.styleMask |= NSWindowStyleMaskResizable;
+    initialWindow_.contentView = tabs;
+    initialWindow_.contentMinSize = NSMakeSize(720, 700);
+    NSRect screen = NSScreen.mainScreen.visibleFrame;
+    [initialWindow_ setContentSize:NSMakeSize(MIN(1000, MAX(720, NSWidth(screen) - 40)), MIN(840, MAX(700, NSHeight(screen) - 50)))];
+    [tabs selectTabViewItem:schedule];
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification *)aNotification {
@@ -359,6 +490,8 @@
     // start up our daemon XPC
     self.xpc = [SCXPCClient new];
     [self.xpc connectToHelperTool];
+    [self configureMainSections];
+    self.statusItemController = [[SCStatusItemController alloc] initWithDelegate:self];
     
     // if we don't have a connection within 0.5 seconds,
     // OR we get back a connection with an old daemon version
@@ -395,7 +528,7 @@
 	// main SelfControl app.  Note that they are divided thusly because distributed
 	// notifications are very expensive and should be minimized.
 	[[NSDistributedNotificationCenter defaultCenter] addObserver: self
-														selector: @selector(handleConfigurationChangedNotification)
+														selector: @selector(handleDaemonConfigurationChangedNotification)
 															name: @"SCConfigurationChangedNotification"
 														  object: nil
                                               suspensionBehavior: NSNotificationSuspensionBehaviorDeliverImmediately];
@@ -433,6 +566,7 @@
 }
 
 - (void)applicationWillTerminate:(NSNotification *)notification {
+    [self.statusItemController invalidate];
     [settings_ synchronizeSettings];
 }
 
@@ -461,7 +595,7 @@
 	if(domainListWindowController_ == nil) {
         [[NSBundle mainBundle] loadNibNamed: @"DomainList" owner: self topLevelObjects: nil];
 	}
-    domainListWindowController_.readOnly = [SCUIUtilities blockIsRunning];
+    domainListWindowController_.readOnly = [SCBlockUtilities legacyBlockIsRunning];
     [domainListWindowController_ showWindow: self];
 }
 
@@ -471,6 +605,7 @@
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed: (NSApplication*) theApplication {
+    if ([defaults_ boolForKey:@"ShowMenuBarItem"]) return NO;
 	// Hack to make the application terminate after the last window is closed, but
 	// INCLUDE the HUD-style timer window.
 	if([[timerWindowController_ window] isVisible])

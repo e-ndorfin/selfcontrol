@@ -60,6 +60,8 @@
     [[self window] makeFirstResponder: self];
     domainList_ = [[defaults_ arrayForKey: @"Blocklist"] mutableCopy];
     [domainListTableView_ reloadData];
+    [allowlistRadioMatrix_ selectCellAtRow:[defaults_ boolForKey:@"BlockAsWhitelist"] ? 1 : 0 column:0];
+    [self updateWindowTitle];
 }
 
 - (void)showWindow:(id)sender {

@@ -24,10 +24,15 @@
 
 #import "TimerWindowController.h"
 #import "SCUIUtilities.h"
+#import "SCXPCClient.h"
+#import "SCWebsiteBreak.h"
 
 @interface TimerWindowController ()
 
 @property(nonatomic, readonly) AppController* appController;
+@property NSButton *websiteBreakButton;
+@property SCXPCClient *websiteBreakClient;
+@property (nonatomic, readwrite) BOOL websiteBreakPending;
 
 @end
 
@@ -48,6 +53,18 @@
 }
 
 - (void)awakeFromNib {
+    self.websiteBreakButton = [NSButton buttonWithTitle:NSLocalizedString(@"2-Minute Website Break…", @"website break button") target:self action:@selector(requestWebsiteBreak:)];
+    self.websiteBreakButton.controlSize = NSControlSizeSmall;
+    self.websiteBreakButton.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
+    self.websiteBreakButton.translatesAutoresizingMaskIntoConstraints = NO;
+    NSView *content = self.window.contentView;
+    [content addSubview:self.websiteBreakButton];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.websiteBreakButton.centerXAnchor constraintEqualToAnchor:content.centerXAnchor constant:75],
+        [self.websiteBreakButton.bottomAnchor constraintEqualToAnchor:content.bottomAnchor constant:-49]
+    ]];
+    self.websiteBreakButton.toolTip = NSLocalizedString(@"Allow one website for 2 minutes, once every 30 minutes. No supervisor password required.", @"website break explanation");
+
 	[[self window] center];
 	[[self window] makeKeyAndOrderFront: self];
 
@@ -142,6 +159,18 @@
 }
 
 - (void)updateTimerDisplay:(NSTimer*)timer {
+    NSTimeInterval remaining = [[settings_ valueForKey:@"WebsiteBreakUntil"] timeIntervalSinceNow];
+    NSTimeInterval cooldown = [[settings_ valueForKey:@"WebsiteBreakNextAvailable"] timeIntervalSinceNow];
+    SCWebsiteBreakPhase phase = SCWebsiteBreakPhaseAtDate([SCBlockUtilities modernBlockIsRunning], [settings_ boolForKey:@"ActiveBlockAsWhitelist"], self.websiteBreakPending, [settings_ valueForKey:@"WebsiteBreakUntil"], [settings_ valueForKey:@"WebsiteBreakNextAvailable"], NSDate.date);
+    BOOL available = phase != SCWebsiteBreakUnavailable;
+    self.websiteBreakButton.hidden = !available;
+    self.websiteBreakButton.enabled = phase == SCWebsiteBreakReady && [self canModifyActiveBlock];
+    if (remaining > 0 || cooldown > 0) {
+        NSInteger seconds = (NSInteger)ceil(remaining > 0 ? remaining : cooldown);
+        NSString *format = remaining > 0 ? NSLocalizedString(@"Break ends in %ld:%02ld", @"website break countdown") : NSLocalizedString(@"Break in %ld:%02ld", @"website break cooldown");
+        self.websiteBreakButton.title = [NSString stringWithFormat:format, (long)(seconds / 60), (long)(seconds % 60)];
+    } else self.websiteBreakButton.title = NSLocalizedString(@"2-Minute Website Break…", @"website break button");
+
 	// update UI for the whole app, in case the block is done with
     [self.appController performSelectorOnMainThread:@selector(refreshUserInterface)
                                          withObject:nil
@@ -232,12 +261,49 @@
 - (void)windowShouldClose:(NSNotification *)notification {
 	// Hack to make the application terminate after the last window is closed, but
 	// INCLUDE the HUD-style timer window.
-	if(![[self.appController initialWindow] isVisible]) {
+	if(![[self.appController initialWindow] isVisible] && ![NSUserDefaults.standardUserDefaults boolForKey:@"ShowMenuBarItem"]) {
 		[NSApp terminate: self];
 	}
 }
 
+- (void)requestWebsiteBreak:(id)sender {
+    if (![self canModifyActiveBlock] || SCWebsiteBreakPhaseAtDate(YES, [settings_ boolForKey:@"ActiveBlockAsWhitelist"], self.websiteBreakPending, [settings_ valueForKey:@"WebsiteBreakUntil"], [settings_ valueForKey:@"WebsiteBreakNextAvailable"], NSDate.date) != SCWebsiteBreakReady) return;
+    NSMutableOrderedSet *domains = [NSMutableOrderedSet new];
+    for (NSString *entry in [settings_ valueForKey:@"ActiveBlocklist"]) {
+        NSString *domain = SCWebsiteBreakDomain(entry);
+        if (domain) [domains addObject:domain];
+    }
+    if (!domains.count) return;
+    NSAlert *alert = [NSAlert new];
+    alert.messageText = NSLocalizedString(@"Take a 2-minute website break?", @"website break dialog title");
+    alert.informativeText = NSLocalizedString(@"Choose one website. It will be blocked again automatically after 2 minutes, even if SelfControl is closed. Your next break will be available 30 minutes after this request. No supervisor password is needed.", @"website break dialog explanation");
+    NSPopUpButton *picker = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(0, 0, 320, 26) pullsDown:NO];
+    [picker addItemsWithTitles:domains.array];
+    alert.accessoryView = picker;
+    [alert addButtonWithTitle:NSLocalizedString(@"Start Break", @"website break confirmation")];
+    [alert addButtonWithTitle:NSLocalizedString(@"Cancel", @"cancel button")];
+    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) {
+        if (response != NSAlertFirstButtonReturn) return;
+        self.websiteBreakPending = YES;
+        [self updateTimerDisplay:nil];
+        if (!self.websiteBreakClient) self.websiteBreakClient = [SCXPCClient new];
+        [self.websiteBreakClient requestWebsiteBreak:picker.titleOfSelectedItem reply:^(NSError *error) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                self.websiteBreakPending = NO;
+                [self->settings_ reloadSettings];
+                [self updateTimerDisplay:nil];
+                if (error) [SCUIUtilities presentError:error];
+            });
+        }];
+    }];
+}
+
+- (BOOL)canModifyActiveBlock {
+    return [SCBlockUtilities modernBlockIsRunning] && [[settings_ valueForKey:@"BlockEndDate"] timeIntervalSinceNow] > 0 && !self.window.attachedSheet;
+}
+
 - (IBAction) addToBlock:(id)sender {
+    if (![self canModifyActiveBlock] || [settings_ boolForKey:@"ActiveBlockAsWhitelist"]) return;
 	// Check if there's already a thread trying to modify the block.  If so, don't make
 	// another.
 	if(![modifyBlockLock tryLock]) {
@@ -252,6 +318,7 @@
 }
 
 - (IBAction) extendBlockTime:(id)sender {
+    if (![self canModifyActiveBlock]) return;
     // Check if there's already a thread trying to modify the block.  If so, don't make
     // another.
     if(![modifyBlockLock tryLock]) {

@@ -65,6 +65,9 @@
 // Called when the "Add to Block" button is clicked, instantiates and runs a sheet
 // to take input for the host to block.
 - (IBAction) addToBlock:(id)sender;
+- (IBAction)extendBlockTime:(id)sender;
+- (void)requestWebsiteBreak:(id)sender;
+@property (nonatomic, readonly) BOOL websiteBreakPending;
 
 // Called after the block end date or other configuration has changed
 - (void)configurationChanged;
